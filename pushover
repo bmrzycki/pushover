@@ -1,35 +1,144 @@
 #!/usr/bin/env python3
 
-"""
-Usage:    pushover <message> --token=<TOKEN> --user=<USER> [options]
+import argparse
+import collections
+import configparser
+import os
+import sys
+import time
 
-Options:
--h, --help            show this help message and exit
---token=<TOKEN>         Pushover app token (overrides environment
-                      PUSHOVER_TOKEN)
---user=<USER>           Pushover user key
-
-Optional:
---device DEVICE       Pushover device name
---title TITLE         Message title
---timestamp TIMESTAMP Optional UNIX timestamp
---priority PRIORITY   Optional priority setting (0=normal, 1=high)
-"""
-
-import docopt
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pushover
 
+_PRI = collections.OrderedDict()
+_PRI['lowest'] = '-2'
+_PRI['-2']     = '-2'
+_PRI['low']    = '-1'
+_PRI['-1']     = '-1'
+_PRI['normal'] =  '0'
+_PRI['0']      =  '0'
+_PRI['high']   =  '1'
+_PRI['1']      =  '1'
+
+
+def warn(msg):
+    sys.stderr.write("warning: ")
+    sys.stderr.write(msg)
+    if msg[-1] != '\n':
+        sys.stderr.write('\n')
+    sys.stderr.flush()
+
+
+def config(fname=None):
+    if fname in (None, ''):
+        fname = os.path.join(os.path.expanduser('~'), '.pushover')
+    if not os.path.isfile(fname):
+        return {}
+
+    c = configparser.ConfigParser()
+    c.read(fname)
+    if 'pushover' not in c:
+        return {}
+
+    d = {}
+    for k, v in c.items('pushover'):
+        d[k] = v
+    return d
+
+
+def main():
+    d = config()
+    p = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument("-c", "--config", help="configuration file", default="")
+    p.add_argument("-d", "--device", help="a specific device", default=[],
+                   action="append")
+    p.add_argument("-m", "--message", help="file to read for message",
+                   type=argparse.FileType('r'), default=sys.stdin)
+    p.add_argument("-p", "--priority", help="message priority",
+                   choices=_PRI.keys(), default="normal")
+    p.add_argument("-s", "--sound", help="message title", default="pushover",
+                   choices=['pushover', 'bike', 'cashregister', 'classical',
+                            'cosmic', 'falling', 'gamelan', 'incoming',
+                            'intermission', 'magic', 'mechanical', 'pianobar',
+                            'siren', 'spacealarm', 'tugboat', 'alien', 'climb',
+                            'persistent', 'echo', 'updown', 'vibrate', 'none'])
+    p.add_argument("-t", "--title", help="message title", default="")
+    p.add_argument("-T", "--timestamp", help="UNIX timestamp", type=int,
+                   default=0)
+    p.add_argument("-u", "--url", help="message url", default="")
+    p.add_argument("-U", "--url-title", help="message url title", default="")
+    p.add_argument("--user-key", help="your Pushover user key",
+                   default=d.get('user_key', ''))
+    p.add_argument("--api-token-key", help="application API token key",
+                   default=d.get('api_token_key', ''))
+
+    a = p.parse_args()
+
+    message = ''
+    for line in a.message:
+        line = line.strip()
+        if line:
+            if message:
+                message += ' ' + line
+            else:
+                message = line
+            if len(message) > 1024:
+                warn("API restricts messages to 1024 characters, truncating")
+                message = message[:1024]
+                break
+    if not message:
+        p.error("a non-empty message is required")
+
+    if a.config:
+        try:
+            f = open(a.config)
+        except Exception as e:
+            p.error("config file failure: %s" % str(e))
+        d = config(a.config)
+        if d:
+            a.user_key = d.get('user_key', a.user_key)
+            a.api_token_key = d.get('api_token_key', a.api_token_key)
+    if a.api_token_key == '':
+        p.error("API token key is required")
+    if a.user_key == '':
+        p.error("User key is required")
+
+    devices = ','.join(a.device)
+    if devices == '':
+        devices = None
+
+    a.priority = _PRI[a.priority]
+    if a.priority == '0':
+        a.priority = ''
+
+    if a.sound == 'pushover':
+        a.sound = ''
+
+    po = pushover.Pushover(a.api_token_key)
+    po.user(a.user_key, devices)
+    msg = po.msg(message)
+
+    for k in ('priority', 'sound', 'title', 'timestamp', 'url', 'url_title'):
+        v = getattr(a, k)
+        if v not in ('', 0, None):
+            msg.set(k, v)
+
+    time.sleep(0.5)  # https://pushover.net/api#friendly
+
+    try:
+        po.sendall()
+    except Exception as e:
+        print(e)
+        return 1
+
+    return 0
+
+
 if __name__ == '__main__':
-    arguments = docopt.docopt(__doc__)
-
-    print(arguments)
-
-    po = pushover.Pushover(arguments['--token'])
-    po.user(arguments['--user'], arguments['--device'])
-    msgid, msg = po.msg(arguments['<message>'])
-
-    msg.set('title', arguments['--title'])
-    msg.set('timestamp', arguments['--timestamp'])
-    msg.set('priority', arguments['--priority'])
-
-    po.send(msgid)
+    from signal import signal, SIGPIPE, SIG_DFL
+    signal(SIGPIPE,SIG_DFL)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(1)
